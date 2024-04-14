@@ -1,0 +1,145 @@
+---
+title: 'NestJS With Prisma Transactional Decorator'
+date: '2024-04-14'
+tags: ['prisma', 'nestjs', 'nest', 'typescript', 'cls']
+summary: 'nestjs 에서 prisma 를 좀 더 편하게 사용해보자'
+---
+
+> 정확한 내용은 [nestjs-cls/transactional](https://papooch.github.io/nestjs-cls/plugins/available-plugins/transactional) 를 참고하자.
+
+`NestJS` 의 `Async Local Storage` 를 활용한 라이브러리이며, 여기서는 사용법 위주로만 설명이 있다.
+
+`NestJS` 에서 `Prisma` 의 `Transaction` 의 경우 `@nestjs-cls/transactional` 의 라이브러리를 통해 편하게 `Transaction` 관리가 가능하다.
+
+```bash
+# prisma 설치
+npm install --save-dev prisma
+npm install @prisma/client
+# cls 및 transaction plugin 설치
+npm install nestjs-cls @nestjs-cls/transactional @nestjs-cls/transactional-adapter-prisma
+```
+
+`Prisma` 사용을 위해 `PrismaService` 를 미리 생성해두자.
+
+```typescript
+// prisma.service.ts
+import { Injectable } from '@nestjs/common'
+import { PrismaClient } from '@prisma/client'
+
+@Injectable()
+export class PrismaService extends PrismaClient {
+  constructor() {
+    super()
+  }
+}
+```
+
+`ClsModule` 을 설정하며 앞서 만든 `PrismaService` 를 `adapter` 로 사용하도록 설정한다.
+
+```typescript
+// prisma.module.ts
+import { Global, Module } from '@nestjs/common';
+import { ClsPluginTransactional } from 1'@nestjs-cls/transactional';
+import { TransactionalAdapterPrisma } from '@nestjs-cls/transactional-adapter-prisma';
+import { ClsModule } from 'nestjs-cls';
+
+import { PrismaService } from './prisma.service';
+
+@Global()
+@Module({
+  imports: [
+    ClsModule.forRoot({
+      plugins: [
+        new ClsPluginTransactional({
+          adapter: new TransactionalAdapterPrisma({
+            prismaInjectionToken: PrismaService,
+          }),
+        }),
+      ],
+    }),
+  ],
+  providers: [PrismaService],
+  exports: [PrismaService],
+})
+export class PrismaModule {}
+```
+
+Module 설정이 끝났다면 사용할 `Service` 에서 `Transactional` 데코레이터를 사용하여 `Transaction` 을 관리할 수 있다.
+
+```typescript
+// sample.service.ts
+import { Injectable } from '@nestjs/common'
+import { Transactional, TransactionHost } from '@nestjs-cls/transactional'
+import { TransactionalAdapterPrisma } from '@nestjs-cls/transactional-adapter-prisma'
+
+@Injectable()
+export class SampleService {
+  constructor(
+    // Prisma 대신 TransactionHost 를 사용한다.
+    private readonly txHost: TransactionHost<TransactionalAdapterPrisma>
+  ) {}
+
+  // Transactional 데코레이터를 사용하여, 실행 중 에러가 난 경우 rollback 처리가 된다.
+  @Transactional()
+  async createSample() {
+    await this.create()
+  }
+
+  private async create() {
+    await this.txHost.tx.sample.create({
+      data: {
+        name: 'sample',
+      },
+    })
+  }
+}
+```
+
+`TransactionHost<TransactionalAdapterPrisma>` 가 너무 길다면 아래처럼 따로 만들어서 주입받아 사용할 수 있다.
+
+```typescript
+// tx-host.ts
+import { Injectable } from '@nestjs/common'
+import { TransactionHost } from '@nestjs-cls/transactional'
+import { TransactionalAdapterPrisma } from '@nestjs-cls/transactional-adapter-prisma'
+
+export type TxPrisma = TransactionHost<TransactionalAdapterPrisma<PrismaClientExtends>>
+export const TxPrisma = TransactionHost<TransactionalAdapterPrisma<PrismaClientExtends>>
+```
+
+```typescript
+// sample.service.ts
+...
+import { TxPrisma } from './tx-host'
+
+...
+  constructor(
+    // 앞서 선언한 TxPrisma 를 사용하여 좀 더 간결하게 사용할 수 있다.
+    private readonly prisma: TxPrisma
+  ) {}
+...
+```
+
+`Transactional` 데코레이터는 몇몇 옵션 설정이 가능하다.
+
+#### Propagation
+
+트랜잭션 전파 방법을 구성하는데 있어 첫번 째 매개변수로 아래와 같이 설정 할 수 있다.
+
+> `Required`(default), `RequiresNew`, `NotSupported`, `Mandatory`, `Never`
+
+1. `Required`: 이미 시작된 트랜잭션이 있으면 해당 트랜잭션을 사용하고, 없으면 새로운 트랜잭션을 시작한다.
+2. `RequiresNew`: 항상 새로운 트랜잭션을 시작한다.
+3. `NotSupported`: 트랜잭션을 사용하지 않는다.
+4. `Mandatory`: 이미 시작된 트랜잭션이 있으면 해당 트랜잭션을 사용하고, 없으면 예외를 발생시킨다.
+5. `Never`: 진행 중인 트랜잭션이 있으면 예외를 발생시키고, 없으면 트랜잭션을 생성한다.
+
+`@Transactional(Propagation.RequiresNew)` 와 같은 형태로 사용할 수 있다.
+
+또한 `timeout`, `maxWait`, `isolationLevel` 와 같은 옵션 설정도 가능하며,
+
+`@Transactional<TransactionalAdapterPrisma>(Propagation.Mandatory, { isolationLevel: 'Serializable' })` 와 같이 사용할 수 있으며, `Propagation.Required` 를 사용한다면, 생략가능하다.
+
+`@Transactional<TransactionalAdapterPrisma>({ isolationLevel: 'Serializable', timeout: 5000, maxWait: 10000 })`
+
+`Prisma` 를 사용하며 `Repository` 를 분리하여 사용하는 경우 Transaction 에 대한 관리가 가능은 하였지만, 꽤나 귀찮았던 방면 해당 라이브러리를 사용하여 편하게 관리할 수 있게된다.
